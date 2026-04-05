@@ -1,0 +1,26 @@
+{
+  "guilds": {
+    "1372589642779594903": {
+      "ticketCat": "1372589643303878706",
+      "archiveCat": "1489983863110242517",
+      "panelRoom": "1489761247749472408",
+      "logsChannel": "1489991795499602040",
+      "roomChannel": null,
+      "guardEnabled": true,
+      "panelEmbedUrl": "https://image2url.com/r2/default/images/1775048162527-058fc03c-a6ff-40f6-8660-222b67bd3e96.png",
+      "ticketEmbedUrl": "https://image2url.com/r2/default/images/1775048162527-058fc03c-a6ff-40f6-8660-222b67bd3e96.png"
+    }
+  },
+  "tickets": {
+    "1489992825490903221": {
+      "guildId": "1372589642779594903",
+      "userId": "1488627472978149640",
+      "claimedBy": "800758781259677698",
+      "originalName": "ticket-support-a8oou",
+      "closed": true,
+      "typeValue": "support",
+      "typeLabel": "دعم",
+      "createdAt": 1775312373513
+    }
+  }
+}
