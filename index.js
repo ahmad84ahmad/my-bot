@@ -1,5 +1,5 @@
 require("dotenv").config();
-
+const fs = require("fs");
 const {
   Client,
   GatewayIntentBits,
@@ -40,7 +40,9 @@ let setupData = {
   panelimg: "",
   ticketimg: ""
 };
-
+if (fs.existsSync("setup.json")) {
+  setupData = JSON.parse(fs.readFileSync("setup.json"));
+}
 const tickets = new Map();
 
 let ticketTypes = [
@@ -325,7 +327,7 @@ client.on("interactionCreate", async (i) => {
         panelimg: i.fields.getTextInputValue("panelimg") || "",
         ticketimg: i.fields.getTextInputValue("ticketimg") || ""
       };
-
+      fs.writeFileSync("setup.json", JSON.stringify(setupData, null, 2));
       const panelChannel = i.guild.channels.cache.get(setupData.room);
       if (!panelChannel) {
         return i.reply({ content: "❌ روم البانل غير صحيح", flags: MessageFlags.Ephemeral });
