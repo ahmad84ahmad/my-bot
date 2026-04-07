@@ -1,5 +1,5 @@
 require("dotenv").config();
-const fs = require("fs");
+
 const {
   Client,
   GatewayIntentBits,
@@ -200,7 +200,7 @@ const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 (async () => {
   try {
     await rest.put(
-      Routes.applicationCommands(process.env.CLIENT_ID),
+      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD.ID),
       { body: commands }
     );
     console.log("✅ Commands Registered");
