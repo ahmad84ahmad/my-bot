@@ -21,6 +21,8 @@ const {
   MessageFlags
 } = require("discord.js");
 
+const mongoose = require("mongoose");
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -33,20 +35,42 @@ const client = new Client({
 const SUPPORT_ROLE_ID = "1489761088282165248";
 const ADMIN_ROLE_ID = "1489912807943045180";
 
-let setupData = {
-  cat: null,
-  archive: null,
-  room: null,
-  panelimg: "",
-  ticketimg: ""
-};
-
-const tickets = new Map();
-
-let ticketTypes = [
+const DEFAULT_TICKET_TYPES = [
   { label: "دعم", value: "support", description: "مشكلة أو استفسار" },
   { label: "شراء", value: "buy", description: "طلب شراء" }
 ];
+
+const setupSchema = new mongoose.Schema({
+  guildId: { type: String, required: true, unique: true },
+  cat: { type: String, default: null },
+  archive: { type: String, default: null },
+  room: { type: String, default: null },
+  panelimg: { type: String, default: "" },
+  ticketimg: { type: String, default: "" },
+  ticketTypes: {
+    type: [
+      {
+        label: { type: String, required: true },
+        value: { type: String, required: true },
+        description: { type: String, required: true }
+      }
+    ],
+    default: DEFAULT_TICKET_TYPES
+  }
+}, { timestamps: true });
+
+const ticketSchema = new mongoose.Schema({
+  guildId: { type: String, required: true, index: true },
+  channelId: { type: String, required: true, unique: true },
+  userId: { type: String, required: true, index: true },
+  claimedBy: { type: String, default: null },
+  name: { type: String, required: true },
+  closed: { type: Boolean, default: false },
+  type: { type: String, required: true }
+}, { timestamps: true });
+
+const Setup = mongoose.model("Setup", setupSchema);
+const Ticket = mongoose.model("Ticket", ticketSchema);
 
 function isAdmin(member) {
   return member.roles.cache.has(ADMIN_ROLE_ID);
@@ -65,27 +89,27 @@ function sanitizeName(text) {
     .slice(0, 90) || "ticket";
 }
 
-function buildPanelEmbed() {
+function buildPanelEmbed(setup) {
   const embed = new EmbedBuilder()
     .setTitle("🎫 نظام التذاكر")
     .setDescription("اختر نوع التذكرة من القائمة");
 
-  if (setupData.panelimg && setupData.panelimg.trim()) {
-    embed.setImage(setupData.panelimg.trim());
+  if (setup?.panelimg?.trim()) {
+    embed.setImage(setup.panelimg.trim());
   }
 
   return embed;
 }
 
-function buildTicketEmbed(typeLabel, msg) {
+function buildTicketEmbed(typeLabel, msg, setup) {
   const embed = new EmbedBuilder()
     .setTitle("🎫 تذكرة جديدة")
     .setDescription(
       `📌 النوع: ${typeLabel}\n\n📝 الطلب:\n${msg}\n\n━━━━━━━━━━━━━━━\n⏱️ ملاحظة:\nسيتم إغلاق التذكرة تلقائيًا بعد 24 ساعة`
     );
 
-  if (setupData.ticketimg && setupData.ticketimg.trim()) {
-    embed.setImage(setupData.ticketimg.trim());
+  if (setup?.ticketimg?.trim()) {
+    embed.setImage(setup.ticketimg.trim());
   }
 
   return embed;
@@ -135,20 +159,37 @@ function buildRatingRow(channelId) {
   );
 }
 
-function hasOpenTicket(userId) {
-  for (const data of tickets.values()) {
-    if (data.user === userId && !data.closed) return true;
+async function getOrCreateSetup(guildId) {
+  let setup = await Setup.findOne({ guildId });
+  if (!setup) {
+    setup = await Setup.create({
+      guildId,
+      ticketTypes: DEFAULT_TICKET_TYPES
+    });
   }
-  return false;
+  return setup;
+}
+
+async function hasOpenTicket(guildId, userId) {
+  const ticket = await Ticket.findOne({
+    guildId,
+    userId,
+    closed: false
+  });
+  return !!ticket;
 }
 
 async function autoCloseTicket(channel) {
-  const data = tickets.get(channel.id);
+  const data = await Ticket.findOne({ channelId: channel.id });
   if (!data || data.closed) return;
 
-  data.closed = true;
+  const setup = await Setup.findOne({ guildId: data.guildId });
+  if (!setup) return;
 
-  const owner = await client.users.fetch(data.user).catch(() => null);
+  data.closed = true;
+  await data.save();
+
+  const owner = await client.users.fetch(data.userId).catch(() => null);
   if (owner) {
     await owner.send({
       content: "📩 تم إغلاق التذكرة تلقائيًا بعد 24 ساعة\n⭐ قيّم الخدمة:",
@@ -157,9 +198,27 @@ async function autoCloseTicket(channel) {
   }
 
   await channel.send("⏱️ تم إغلاق التذكرة تلقائيًا بعد 24 ساعة").catch(() => {});
-  await channel.setParent(setupData.archive).catch(() => {});
+  await channel.setParent(setup.archive).catch(() => {});
   if (!channel.name.startsWith("closed-")) {
     await channel.setName(`closed-${channel.name}`.slice(0, 90)).catch(() => {});
+  }
+}
+
+async function scheduleExistingOpenTickets() {
+  const openTickets = await Ticket.find({ closed: false });
+  const now = Date.now();
+
+  for (const ticket of openTickets) {
+    const createdAt = new Date(ticket.createdAt).getTime();
+    const dueIn = Math.max(0, (24 * 60 * 60 * 1000) - (now - createdAt));
+
+    setTimeout(async () => {
+      const guild = client.guilds.cache.get(ticket.guildId);
+      if (!guild) return;
+      const channel = guild.channels.cache.get(ticket.channelId);
+      if (!channel) return;
+      await autoCloseTicket(channel).catch(() => {});
+    }, dueIn);
   }
 }
 
@@ -195,40 +254,48 @@ const commands = [
 
 const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 
-(async () => {
+async function registerCommands() {
   try {
     await rest.put(
-      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+      Routes.applicationCommands(process.env.CLIENT_ID),
       { body: commands }
     );
-    console.log("✅ Commands Registered");
+    console.log("✅ Global Commands Registered");
   } catch (err) {
     console.error("Register error:", err);
   }
-})();
+}
 
-client.once("clientReady", () => {
+client.once("clientReady", async () => {
   console.log(`🔥 ${client.user.tag}`);
+  await scheduleExistingOpenTickets();
 });
 
 client.on("interactionCreate", async (i) => {
   try {
-    // slash commands
     if (i.isChatInputCommand()) {
       if (i.commandName === "ticket-add") {
         if (!isAdmin(i.member)) {
           return i.reply({ content: "❌ فقط الإدارة", flags: MessageFlags.Ephemeral });
         }
 
+        const setup = await getOrCreateSetup(i.guild.id);
         const name = i.options.getString("name");
         const desc = i.options.getString("desc");
 
-        ticketTypes.push({
+        const value = sanitizeName(name);
+
+        if (setup.ticketTypes.some(t => t.label === name || t.value === value)) {
+          return i.reply({ content: "❌ النوع موجود بالفعل", flags: MessageFlags.Ephemeral });
+        }
+
+        setup.ticketTypes.push({
           label: name,
-          value: sanitizeName(name),
+          value,
           description: desc
         });
 
+        await setup.save();
         return i.reply({ content: "✅ تم إضافة النوع", flags: MessageFlags.Ephemeral });
       }
 
@@ -237,11 +304,12 @@ client.on("interactionCreate", async (i) => {
           return i.reply({ content: "❌ فقط الإدارة", flags: MessageFlags.Ephemeral });
         }
 
+        const setup = await getOrCreateSetup(i.guild.id);
         const oldName = i.options.getString("old");
         const newName = i.options.getString("new");
         const desc = i.options.getString("desc");
 
-        const t = ticketTypes.find(x => x.label === oldName);
+        const t = setup.ticketTypes.find(x => x.label === oldName);
         if (!t) {
           return i.reply({ content: "❌ النوع غير موجود", flags: MessageFlags.Ephemeral });
         }
@@ -250,6 +318,7 @@ client.on("interactionCreate", async (i) => {
         t.value = sanitizeName(newName);
         t.description = desc;
 
+        await setup.save();
         return i.reply({ content: "✅ تم تعديل النوع", flags: MessageFlags.Ephemeral });
       }
 
@@ -258,14 +327,16 @@ client.on("interactionCreate", async (i) => {
           return i.reply({ content: "❌ فقط الإدارة", flags: MessageFlags.Ephemeral });
         }
 
+        const setup = await getOrCreateSetup(i.guild.id);
         const name = i.options.getString("name");
-        const before = ticketTypes.length;
-        ticketTypes = ticketTypes.filter(x => x.label !== name);
+        const before = setup.ticketTypes.length;
 
-        if (ticketTypes.length === before) {
+        setup.ticketTypes = setup.ticketTypes.filter(x => x.label !== name);
+        if (setup.ticketTypes.length === before) {
           return i.reply({ content: "❌ النوع غير موجود", flags: MessageFlags.Ephemeral });
         }
 
+        await setup.save();
         return i.reply({ content: "✅ تم حذف النوع", flags: MessageFlags.Ephemeral });
       }
 
@@ -316,17 +387,18 @@ client.on("interactionCreate", async (i) => {
       }
     }
 
-    // setup modal
     if (i.isModalSubmit() && i.customId === "setup_modal") {
-      setupData = {
-        cat: i.fields.getTextInputValue("cat"),
-        archive: i.fields.getTextInputValue("archive"),
-        room: i.fields.getTextInputValue("room"),
-        panelimg: i.fields.getTextInputValue("panelimg") || "",
-        ticketimg: i.fields.getTextInputValue("ticketimg") || ""
-      };
-      
-      const panelChannel = i.guild.channels.cache.get(setupData.room);
+      const setup = await getOrCreateSetup(i.guild.id);
+
+      setup.cat = i.fields.getTextInputValue("cat");
+      setup.archive = i.fields.getTextInputValue("archive");
+      setup.room = i.fields.getTextInputValue("room");
+      setup.panelimg = i.fields.getTextInputValue("panelimg") || "";
+      setup.ticketimg = i.fields.getTextInputValue("ticketimg") || "";
+
+      await setup.save();
+
+      const panelChannel = i.guild.channels.cache.get(setup.room);
       if (!panelChannel) {
         return i.reply({ content: "❌ روم البانل غير صحيح", flags: MessageFlags.Ephemeral });
       }
@@ -334,24 +406,24 @@ client.on("interactionCreate", async (i) => {
       const menu = new StringSelectMenuBuilder()
         .setCustomId("ticket_select")
         .setPlaceholder("اختر نوع التذكرة")
-        .addOptions(ticketTypes);
+        .addOptions(setup.ticketTypes);
 
       await panelChannel.send({
-        embeds: [buildPanelEmbed()],
+        embeds: [buildPanelEmbed(setup)],
         components: [new ActionRowBuilder().addComponents(menu)]
       });
 
       return i.reply({ content: "✅ تم الإعداد وإرسال البانل", flags: MessageFlags.Ephemeral });
     }
 
-    // select menu
     if (i.isStringSelectMenu() && i.customId === "ticket_select") {
-      if (hasOpenTicket(i.user.id)) {
+      if (await hasOpenTicket(i.guild.id, i.user.id)) {
         return i.reply({ content: "❌ عندك تذكرة مفتوحة بالفعل", flags: MessageFlags.Ephemeral });
       }
 
+      const setup = await getOrCreateSetup(i.guild.id);
       const typeValue = i.values[0];
-      const selected = ticketTypes.find(t => t.value === typeValue);
+      const selected = setup.ticketTypes.find(t => t.value === typeValue);
 
       const modal = new ModalBuilder()
         .setCustomId(`ticket_modal_${typeValue}`)
@@ -367,26 +439,27 @@ client.on("interactionCreate", async (i) => {
       return i.showModal(modal);
     }
 
-    // create ticket
     if (i.isModalSubmit() && i.customId.startsWith("ticket_modal_")) {
       await i.deferReply({ flags: MessageFlags.Ephemeral });
 
       try {
-        if (!setupData.cat || !setupData.archive || !setupData.room) {
+        const setup = await Setup.findOne({ guildId: i.guild.id });
+
+        if (!setup || !setup.cat || !setup.archive || !setup.room) {
           return i.editReply("❌ لازم تسوي setup أول");
         }
 
-        if (hasOpenTicket(i.user.id)) {
+        if (await hasOpenTicket(i.guild.id, i.user.id)) {
           return i.editReply("❌ عندك تذكرة مفتوحة بالفعل");
         }
 
         const typeValue = i.customId.replace("ticket_modal_", "");
-        const selected = ticketTypes.find(t => t.value === typeValue);
+        const selected = setup.ticketTypes.find(t => t.value === typeValue);
         const msg = i.fields.getTextInputValue("msg");
 
         const ch = await i.guild.channels.create({
           name: sanitizeName(`ticket-${typeValue}-${i.user.username}`),
-          parent: setupData.cat,
+          parent: setup.cat,
           type: ChannelType.GuildText,
           permissionOverwrites: [
             {
@@ -421,9 +494,11 @@ client.on("interactionCreate", async (i) => {
           ]
         });
 
-        tickets.set(ch.id, {
-          user: i.user.id,
-          claimed: null,
+        await Ticket.create({
+          guildId: i.guild.id,
+          channelId: ch.id,
+          userId: i.user.id,
+          claimedBy: null,
           name: ch.name,
           closed: false,
           type: selected ? selected.label : typeValue
@@ -431,7 +506,7 @@ client.on("interactionCreate", async (i) => {
 
         await ch.send({
           content: `<@${i.user.id}> <@&${SUPPORT_ROLE_ID}>`,
-          embeds: [buildTicketEmbed(selected ? selected.label : typeValue, msg)],
+          embeds: [buildTicketEmbed(selected ? selected.label : typeValue, msg, setup)],
           components: [buildMainButtons(), buildDeleteRow()]
         });
 
@@ -446,45 +521,44 @@ client.on("interactionCreate", async (i) => {
       }
     }
 
-    // claim
     if (i.isButton() && i.customId === "claim") {
       if (!isSupport(i.member)) {
         return i.reply({ content: "❌ فقط الدعم أو الإدارة", flags: MessageFlags.Ephemeral });
       }
 
-      const data = tickets.get(i.channel.id);
+      const data = await Ticket.findOne({ channelId: i.channel.id });
       if (!data) {
         return i.reply({ content: "❌ هذه ليست تذكرة", flags: MessageFlags.Ephemeral });
       }
 
-      if (data.claimed) {
+      if (data.claimedBy) {
         return i.reply({ content: "❌ التذكرة مستلمة بالفعل", flags: MessageFlags.Ephemeral });
       }
 
-      data.claimed = i.user.id;
-      await i.channel.setName(sanitizeName(`claimed-${i.user.username}`));
+      data.claimedBy = i.user.id;
+      await data.save();
 
+      await i.channel.setName(sanitizeName(`claimed-${i.user.username}`));
       return i.reply({ content: `📥 تم استلام التذكرة بواسطة ${i.user}` });
     }
 
-    // unclaim
     if (i.isButton() && i.customId === "unclaim") {
-      const data = tickets.get(i.channel.id);
+      const data = await Ticket.findOne({ channelId: i.channel.id });
       if (!data) {
         return i.reply({ content: "❌ هذه ليست تذكرة", flags: MessageFlags.Ephemeral });
       }
 
-      if (data.claimed !== i.user.id && !isAdmin(i.member)) {
+      if (data.claimedBy !== i.user.id && !isAdmin(i.member)) {
         return i.reply({ content: "❌ فقط المستلم أو الإدارة", flags: MessageFlags.Ephemeral });
       }
 
-      data.claimed = null;
-      await i.channel.setName(data.name);
+      data.claimedBy = null;
+      await data.save();
 
+      await i.channel.setName(data.name);
       return i.reply({ content: "↩️ تم إلغاء الاستلام" });
     }
 
-    // add member
     if (i.isButton() && i.customId === "add") {
       if (!isSupport(i.member)) {
         return i.reply({ content: "❌ فقط الدعم أو الإدارة", flags: MessageFlags.Ephemeral });
@@ -513,7 +587,6 @@ client.on("interactionCreate", async (i) => {
       return i.reply({ content: "✅ تمت إضافة العضو", flags: MessageFlags.Ephemeral });
     }
 
-    // edit
     if (i.isButton() && i.customId === "edit") {
       if (!isAdmin(i.member)) {
         return i.reply({ content: "❌ فقط الإدارة", flags: MessageFlags.Ephemeral });
@@ -538,34 +611,40 @@ client.on("interactionCreate", async (i) => {
         return i.reply({ content: "❌ فقط الإدارة", flags: MessageFlags.Ephemeral });
       }
 
-      const data = tickets.get(i.channel.id);
+      const data = await Ticket.findOne({ channelId: i.channel.id });
       if (!data) {
         return i.reply({ content: "❌ هذه ليست تذكرة", flags: MessageFlags.Ephemeral });
       }
 
       const newName = sanitizeName(i.fields.getTextInputValue("name"));
       data.name = newName;
-      await i.channel.setName(newName);
+      await data.save();
 
+      await i.channel.setName(newName);
       return i.reply({ content: "✅ تم تعديل الاسم", flags: MessageFlags.Ephemeral });
     }
 
-    // close
     if (i.isButton() && i.customId === "close") {
       if (!isAdmin(i.member)) {
         return i.reply({ content: "❌ فقط الإدارة", flags: MessageFlags.Ephemeral });
       }
 
-      const data = tickets.get(i.channel.id);
+      const data = await Ticket.findOne({ channelId: i.channel.id });
       if (!data) {
         return i.reply({ content: "❌ هذه ليست تذكرة", flags: MessageFlags.Ephemeral });
+      }
+
+      const setup = await Setup.findOne({ guildId: i.guild.id });
+      if (!setup) {
+        return i.reply({ content: "❌ لازم تسوي setup أول", flags: MessageFlags.Ephemeral });
       }
 
       await i.reply({ content: "🔒 جاري الإغلاق...", flags: MessageFlags.Ephemeral });
 
       data.closed = true;
+      await data.save();
 
-      const owner = await client.users.fetch(data.user).catch(() => null);
+      const owner = await client.users.fetch(data.userId).catch(() => null);
       if (owner) {
         await owner.send({
           content: `📩 تم إغلاق التذكرة بواسطة ${i.user}\n⭐ قيّم الخدمة:`,
@@ -573,50 +652,51 @@ client.on("interactionCreate", async (i) => {
         }).catch(() => {});
       }
 
-      await i.channel.setParent(setupData.archive).catch(() => {});
+      await i.channel.setParent(setup.archive).catch(() => {});
       if (!i.channel.name.startsWith("closed-")) {
         await i.channel.setName(`closed-${i.channel.name}`.slice(0, 90)).catch(() => {});
       }
       await i.channel.send(`🔒 تم إغلاق التذكرة بواسطة ${i.user}`).catch(() => {});
     }
 
-    // rate
     if (i.isButton() && i.customId.startsWith("rate_")) {
+      const [_, stars, channelId] = i.customId.split("_");
+      const data = await Ticket.findOne({ channelId });
 
-  const [_, stars, channelId] = i.customId.split("_");
-  const data = tickets.get(channelId);
+      if (!data) {
+        return i.reply({ content: "❌ التذكرة غير موجودة", flags: MessageFlags.Ephemeral });
+      }
 
-  if (!data)
-    return i.reply({ content: "❌ التذكرة غير موجودة", flags: 64 });
+      if (!data.claimedBy) {
+        return i.reply({ content: "❌ لم يتم استلام التذكرة", flags: MessageFlags.Ephemeral });
+      }
 
-  if (!data.claimed)
-    return i.reply({ content: "❌ لم يتم استلام التذكرة", flags: 64 });
+      const staff = await client.users.fetch(data.claimedBy).catch(() => null);
 
-  const staff = await client.users.fetch(data.claimed).catch(()=>null);
-
-  if (staff) {
-    await staff.send(`
+      if (staff) {
+        await staff.send(`
 ⭐ تم تقييمك!
 
-👤 العميل: <@${data.user}>
+👤 العميل: <@${data.userId}>
 ⭐ التقييم: ${stars} / 5
 🎫 التذكرة: ${channelId}
-`).catch(()=>{});
-  }
+`).catch(() => {});
+      }
 
-  return i.reply({
-    content: `✅ تم إرسال تقييمك (${stars} ⭐)`,
-    flags: 64
-  });
-}
+      return i.reply({
+        content: `✅ تم إرسال تقييمك (${stars} ⭐)`,
+        flags: MessageFlags.Ephemeral
+      });
+    }
 
-    // delete
     if (i.isButton() && i.customId === "delete") {
       if (!isAdmin(i.member)) {
         return i.reply({ content: "❌ فقط الإدارة", flags: MessageFlags.Ephemeral });
       }
 
       await i.reply({ content: "🗑️ جاري الحذف..." });
+
+      await Ticket.deleteOne({ channelId: i.channel.id }).catch(() => {});
 
       setTimeout(() => {
         i.channel.delete().catch(() => {});
@@ -630,14 +710,25 @@ client.on("interactionCreate", async (i) => {
   }
 });
 
-client.login(process.env.TOKEN);
-const express = require('express');
+(async () => {
+  try {
+    await mongoose.connect(process.env.MONGODB_URI);
+    console.log("✅ MongoDB Connected");
+
+    await registerCommands();
+    await client.login(process.env.TOKEN);
+  } catch (err) {
+    console.error("Startup error:", err);
+  }
+})();
+
+const express = require("express");
 const app = express();
 
-app.get('/', (req, res) => {
-  res.send('Bot is running');
+app.get("/", (req, res) => {
+  res.send("Bot is running");
 });
 
 app.listen(3000, () => {
-  console.log('Web server is running');
+  console.log("Web server is running");
 });
