@@ -40,9 +40,7 @@ let setupData = {
   panelimg: "",
   ticketimg: ""
 };
-if (fs.existsSync("setup.json")) {
-  setupData = JSON.parse(fs.readFileSync("setup.json"));
-}
+
 const tickets = new Map();
 
 let ticketTypes = [
@@ -200,7 +198,7 @@ const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 (async () => {
   try {
     await rest.put(
-      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD.ID),
+      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
       { body: commands }
     );
     console.log("✅ Commands Registered");
@@ -327,7 +325,7 @@ client.on("interactionCreate", async (i) => {
         panelimg: i.fields.getTextInputValue("panelimg") || "",
         ticketimg: i.fields.getTextInputValue("ticketimg") || ""
       };
-      fs.writeFileSync("setup.json", JSON.stringify(setupData, null, 2));
+      
       const panelChannel = i.guild.channels.cache.get(setupData.room);
       if (!panelChannel) {
         return i.reply({ content: "❌ روم البانل غير صحيح", flags: MessageFlags.Ephemeral });
