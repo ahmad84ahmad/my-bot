@@ -22,6 +22,7 @@ const {
 } = require("discord.js");
 
 const mongoose = require("mongoose");
+const express = require("express");
 
 const client = new Client({
   intents: [
@@ -89,12 +90,22 @@ function sanitizeName(text) {
     .slice(0, 90) || "ticket";
 }
 
+function isValidHttpUrl(value) {
+  if (!value || typeof value !== "string") return false;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function buildPanelEmbed(setup) {
   const embed = new EmbedBuilder()
     .setTitle("🎫 نظام التذاكر")
     .setDescription("اختر نوع التذكرة من القائمة");
 
-  if (setup?.panelimg?.trim()) {
+  if (isValidHttpUrl(setup?.panelimg)) {
     embed.setImage(setup.panelimg.trim());
   }
 
@@ -108,7 +119,7 @@ function buildTicketEmbed(typeLabel, msg, setup) {
       `📌 النوع: ${typeLabel}\n\n📝 الطلب:\n${msg}\n\n━━━━━━━━━━━━━━━\n⏱️ ملاحظة:\nسيتم إغلاق التذكرة تلقائيًا بعد 24 ساعة`
     );
 
-  if (setup?.ticketimg?.trim()) {
+  if (isValidHttpUrl(setup?.ticketimg)) {
     embed.setImage(setup.ticketimg.trim());
   }
 
@@ -198,7 +209,9 @@ async function autoCloseTicket(channel) {
   }
 
   await channel.send("⏱️ تم إغلاق التذكرة تلقائيًا بعد 24 ساعة").catch(() => {});
-  await channel.setParent(setup.archive).catch(() => {});
+  if (setup.archive) {
+    await channel.setParent(setup.archive).catch(() => {});
+  }
   if (!channel.name.startsWith("closed-")) {
     await channel.setName(`closed-${channel.name}`.slice(0, 90)).catch(() => {});
   }
@@ -215,8 +228,10 @@ async function scheduleExistingOpenTickets() {
     setTimeout(async () => {
       const guild = client.guilds.cache.get(ticket.guildId);
       if (!guild) return;
+
       const channel = guild.channels.cache.get(ticket.channelId);
       if (!channel) return;
+
       await autoCloseTicket(channel).catch(() => {});
     }, dueIn);
   }
@@ -388,33 +403,72 @@ client.on("interactionCreate", async (i) => {
     }
 
     if (i.isModalSubmit() && i.customId === "setup_modal") {
-      const setup = await getOrCreateSetup(i.guild.id);
+      await i.deferReply({ flags: MessageFlags.Ephemeral });
 
-      setup.cat = i.fields.getTextInputValue("cat");
-      setup.archive = i.fields.getTextInputValue("archive");
-      setup.room = i.fields.getTextInputValue("room");
-      setup.panelimg = i.fields.getTextInputValue("panelimg") || "";
-      setup.ticketimg = i.fields.getTextInputValue("ticketimg") || "";
+      try {
+        const setup = await getOrCreateSetup(i.guild.id);
 
-      await setup.save();
+        setup.cat = i.fields.getTextInputValue("cat").trim();
+        setup.archive = i.fields.getTextInputValue("archive").trim();
+        setup.room = i.fields.getTextInputValue("room").trim();
+        setup.panelimg = (i.fields.getTextInputValue("panelimg") || "").trim();
+        setup.ticketimg = (i.fields.getTextInputValue("ticketimg") || "").trim();
 
-      const panelChannel = i.guild.channels.cache.get(setup.room);
-      if (!panelChannel) {
-        return i.reply({ content: "❌ روم البانل غير صحيح", flags: MessageFlags.Ephemeral });
+        await setup.save();
+
+        const ticketCategory = i.guild.channels.cache.get(setup.cat);
+        const archiveCategory = i.guild.channels.cache.get(setup.archive);
+        const panelChannel = i.guild.channels.cache.get(setup.room);
+
+        if (!ticketCategory || ticketCategory.type !== ChannelType.GuildCategory) {
+          return i.editReply("❌ ايدي كاتيجوري التذاكر غير صحيح");
+        }
+
+        if (!archiveCategory || archiveCategory.type !== ChannelType.GuildCategory) {
+          return i.editReply("❌ ايدي كاتيجوري الأرشيف غير صحيح");
+        }
+
+        if (!panelChannel) {
+          return i.editReply("❌ روم البانل غير صحيح");
+        }
+
+        if (!panelChannel.isTextBased()) {
+          return i.editReply("❌ لازم روم البانل يكون كتابي");
+        }
+
+        const perms = panelChannel.permissionsFor(i.guild.members.me);
+        if (!perms || !perms.has([
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages
+        ])) {
+          return i.editReply("❌ البوت ما عنده صلاحيات كافية في روم البانل");
+        }
+
+        const menu = new StringSelectMenuBuilder()
+          .setCustomId("ticket_select")
+          .setPlaceholder("اختر نوع التذكرة")
+          .addOptions(setup.ticketTypes);
+
+        try {
+          await panelChannel.send({
+            content: "🎫 نظام التذاكر",
+            embeds: [buildPanelEmbed(setup)],
+            components: [new ActionRowBuilder().addComponents(menu)]
+          });
+        } catch (err) {
+          console.error("EMBED ERROR:", err);
+
+          await panelChannel.send({
+            content: "🎫 نظام التذاكر",
+            components: [new ActionRowBuilder().addComponents(menu)]
+          });
+        }
+
+        return i.editReply("✅ تم الإعداد وإرسال البانل");
+      } catch (err) {
+        console.error("SETUP ERROR:", err);
+        return i.editReply("❌ خطأ في setup");
       }
-
-      const menu = new StringSelectMenuBuilder()
-        .setCustomId("ticket_select")
-        .setPlaceholder("اختر نوع التذكرة")
-        .addOptions(setup.ticketTypes);
-
-      await panelChannel.send({
-       content: "🎫 نظام التذاكر",
-        embeds: [buildPanelEmbed(setup)],
-        components: [new ActionRowBuilder().addComponents(menu)]
-      });
-
-      return i.reply({ content: "✅ تم الإعداد وإرسال البانل", flags: MessageFlags.Ephemeral });
     }
 
     if (i.isStringSelectMenu() && i.customId === "ticket_select") {
@@ -723,7 +777,6 @@ client.on("interactionCreate", async (i) => {
   }
 })();
 
-const express = require("express");
 const app = express();
 
 app.get("/", (req, res) => {
