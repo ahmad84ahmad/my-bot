@@ -447,10 +447,29 @@ client.on("interactionCreate", async (i) => {
         const menu = new StringSelectMenuBuilder()
           .setCustomId("ticket_select")
           .setPlaceholder("اختر نوع التذكرة")
-          .addOptions(
-        setup.ticketTypes.filter(t => t.label && t.value)
+        const validTypes = (setup.ticketTypes || [])
+  .filter(t =>
+    t &&
+    typeof t === "object" &&
+    typeof t.label === "string" &&
+    t.label.trim() !== "" &&
+    typeof t.value === "string" &&
+    t.value.trim() !== ""
+  )
+  .map(t => ({
+    label: t.label.trim(),
+    value: t.value.trim(),
+    description: t.description?.toString().slice(0, 100) || "—"
+  }));
 
-      );
+if (validTypes.length === 0) {
+  return i.editReply("❌ ما فيه أنواع تذاكر صالحة (الداتا خربانة)");
+}
+
+   const menu = new StringSelectMenuBuilder()
+   .setCustomId("ticket_select")
+     .setPlaceholder("اختر نوع التذكرة")
+        .addOptions(validTypes);
 
         try {
           await panelChannel.send({
