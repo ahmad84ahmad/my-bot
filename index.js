@@ -414,6 +414,27 @@ client.on("interactionCreate", async (i) => {
         setup.panelimg = (i.fields.getTextInputValue("panelimg") || "").trim();
         setup.ticketimg = (i.fields.getTextInputValue("ticketimg") || "").trim();
 
+        const cleanTypes = (setup.ticketTypes || [])
+          .filter(t =>
+            t &&
+            typeof t === "object" &&
+            typeof t.label === "string" &&
+            t.label.trim() !== "" &&
+            typeof t.value === "string" &&
+            t.value.trim() !== ""
+          )
+          .map(t => ({
+            label: t.label.trim(),
+            value: t.value.trim(),
+            description: (t.description?.toString() || "—").slice(0, 100)
+          }));
+
+        if (cleanTypes.length === 0) {
+          setup.ticketTypes = DEFAULT_TICKET_TYPES;
+        } else {
+          setup.ticketTypes = cleanTypes;
+        }
+
         await setup.save();
 
         const ticketCategory = i.guild.channels.cache.get(setup.cat);
@@ -444,32 +465,13 @@ client.on("interactionCreate", async (i) => {
           return i.editReply("❌ البوت ما عنده صلاحيات كافية في روم البانل");
         }
 
-        const menu = new StringSelectMenuBuilder()
-          .setCustomId("ticket_select")
-          .setPlaceholder("اختر نوع التذكرة")
-        const validTypes = (setup.ticketTypes || [])
-  .filter(t =>
-    t &&
-    typeof t === "object" &&
-    typeof t.label === "string" &&
-    t.label.trim() !== "" &&
-    typeof t.value === "string" &&
-    t.value.trim() !== ""
-  )
-  .map(t => ({
-    label: t.label.trim(),
-    value: t.value.trim(),
-    description: t.description?.toString().slice(0, 100) || "—"
-  }));
+        const validTypes = (setup.ticketTypes || []).map(t => ({
+          label: t.label,
+          value: t.value,
+          description: (t.description || "—").slice(0, 100)
+        }));
 
-if (validTypes.length === 0) {
-  return i.editReply("❌ ما فيه أنواع تذاكر صالحة (الداتا خربانة)");
-}
-
-   const menu = new StringSelectMenuBuilder()
-   .setCustomId("ticket_select")
-     .setPlaceholder("اختر نوع التذكرة")
-        .addOptions(validTypes);
+          .addOptions(validTypes);
 
         try {
           await panelChannel.send({
