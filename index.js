@@ -409,6 +409,7 @@ client.on("interactionCreate", async (i) => {
         .addOptions(setup.ticketTypes);
 
       await panelChannel.send({
+       content: "🎫 نظام التذاكر",
         embeds: [buildPanelEmbed(setup)],
         components: [new ActionRowBuilder().addComponents(menu)]
       });
