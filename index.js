@@ -447,7 +447,10 @@ client.on("interactionCreate", async (i) => {
         const menu = new StringSelectMenuBuilder()
           .setCustomId("ticket_select")
           .setPlaceholder("اختر نوع التذكرة")
-          .addOptions(setup.ticketTypes);
+          .addOptions(
+        setup.ticketTypes.filter(t => t.label && t.value)
+
+      );
 
         try {
           await panelChannel.send({
